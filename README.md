@@ -1,6 +1,6 @@
 # Load NYC Citi Bike Trip csv data files into MySQL Server Using Python
 
-This project simulates loading large dataset onto database (MySQL) efficiently using Pandas in batch mode
+This project loads large dataset onto database (MySQL) efficiently using Pandas in batch mode
 
 The data is taken from NYC public data source 
 
