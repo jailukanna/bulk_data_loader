@@ -1,6 +1,6 @@
 # Load NYC Citi Bike Trip csv data files into MySQL Server Using Python
 
-This project demonstrates downloading NYC bike share data and loading large dataset (~25.5 million rows) onto database (MySQL) efficiently using Pandas in batch mode
+This project downloads NYC bike share data and loads large dataset (~25.5 million rows) onto database (MySQL) efficiently using Pandas in batch mode
 
 The data is taken from NYC public data source. Multiple csv files are zipped (by year, quarter etc). All files are under S3 bucket https://s3.amazonaws.com/capitalbikeshare-data'
 
