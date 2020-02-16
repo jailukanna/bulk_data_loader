@@ -1,79 +1,20 @@
 # -*- coding: utf-8 -*-
-import glob
 import sys
 
 import pandas as pd
-import sqlalchemy
-import configparser
 import time
+import tempfile
+
+import requests
+import xmltodict
+
+from utils import get_connection_engine, list_files, load_csv_files_into_df, download_zip_file
 
 """
     This class reads csv files and insert into database using pandas dataframe
 """
 
-
-def read_config_sections(config_ini_file: str):
-    """
-    read configuration ini file sections
-    :param config_ini_file: config file path
-    :return: sections as dictionary
-    """
-    print('reading config file from: {}'.format(config_ini_file))
-    config = configparser.ConfigParser()
-    config.read(config_ini_file)
-    section_dict = {section: {item[0]: item[1] for item in config.items(section)} for section in config.sections()}
-    # print(section_dict)
-    return section_dict
-
-
-def _list_files(dir_path) -> list:
-    """
-    list csv files from the directory
-    :param dir_path: path to csv files
-    :return: list of csv files
-    """
-    print('Reading files from path: {}'.format(dir_path))
-    csv_files = [file for file in glob.glob(dir_path + "/*.csv")]
-
-    return csv_files
-
-
-def _load_csv_files(csv_files: list) -> pd.DataFrame:
-    """
-    load csv files into dataframe
-    :param csv_files:  list of csv file path
-    :return: data frame
-    """
-    start_time = time.process_time()
-    print('loading files into dataframe')
-    df = pd.DataFrame()
-    for file in csv_files:
-        print('loading file into dataframe: {}'.format(file))
-        csv_data = pd.read_csv(file)
-        # print(csv_data.head().to_string())
-        # print(csv_data.count())
-        df = df.append(csv_data, ignore_index=True, sort=False)
-
-    elapsed_time = time.process_time() - start_time
-    print('csv files data read into dataframe elapsed time (sec): {}'.format(elapsed_time))
-
-    return df
-
-
-def _get_connection_engine(config_ini_file: str):
-    """
-    get mysql connection information from ini file
-    :param config_ini_file:
-    :return: sqlalchemy connection engine
-    """
-    ini_section_dict = read_config_sections(config_ini_file)
-    db_config = ini_section_dict.get('MySQL')
-    database_connection = sqlalchemy.create_engine('mysql+mysqlconnector://{0}:{1}@{2}/{3}?use_pure={4}'.
-                                                   format(db_config.get('username'), db_config.get('password'),
-                                                          db_config.get('host'), db_config.get('schema_name'),
-                                                          db_config.get('mysql_connector_use_pure')),
-                                                   echo=bool(db_config.get('echo_sql', False)), )
-    return database_connection
+NYC_BIKE_SHARE_S3_REPO = 'https://s3.amazonaws.com/capitalbikeshare-data'
 
 
 def _insert_into_db(df: pd.DataFrame, config_ini_file: str):
@@ -89,36 +30,91 @@ def _insert_into_db(df: pd.DataFrame, config_ini_file: str):
     print(df.head())
     print(df.count())
     print(df.shape)
-    connection_info = _get_connection_engine(config_ini_file)
+    connection_info = get_connection_engine(config_ini_file)
     print('connection_info: {}'.format(connection_info))
-    df = df[0:10000]
-    df.to_sql(con=connection_info, name='nyc_bike_sharenyc_bike_share', if_exists='append', method='multi',
-              chunksize=10000)
+    df = df[0:5]
+
+    # db_tab_cols = pd.read_sql(con=connection_info, sql='select * from nyc_bike_share where 1=2').columns.tolist()
+    # print('db_tab_cols: {}'.format(db_tab_cols))
+    # df.columns = db_tab_cols
+    print('dataframe columns: {}'.format(df.columns))
+
+    # rename columns to match with db table column name
+    columns_to_rename = {'Duration': 'Duration', 'Start date': 'Start_date', 'End date': 'End_date',
+                         'Start station number': 'Start_station_number',
+                         'Start station': 'Start_station', 'End station number': 'End_station_number',
+                         'End station': 'End_station', 'Bike number': 'Bike_number',
+                         'Member type': 'Member_type'}
+    df = df.rename(columns=columns_to_rename)
+
+    print('dataframe columns: {}'.format(df.columns))
+    df.to_sql(con=connection_info, name='nyc_bike_share', if_exists='append', method='multi',
+              index=False, chunksize=1000)
 
     elapsed_time = time.process_time() - start_time
     print('data inserted into database')
     print('Database insert elapsed time (sec): {}'.format(elapsed_time))
 
 
-def main(dir_path_name: str, config_ini_file: str):
+def _parse_s3_xml_result_to_files(xml_content: str) -> list:
+    """
+    Parse xml to extract zip files. checkout sample s3_result.xml under this project root directory
+    :param xml_content: s3 xml result
+    :return: list of files
+    """
+    ordered_dict = xmltodict.parse(xml_content)['ListBucketResult']['Contents']
+    # print(ordered_dict)
+    result = [items[key] for items in ordered_dict for key in items if key == 'Key' and '.zip' in items[key]]
+    print('xml parsed result: {}'.format(result))
+    return result
+
+
+def _get_s3_bucket_files(s3_bucket_url: str) -> list:
+    """
+    get zip files under s3 bucket
+    :param s3_bucket_url:
+    :return: list of zip files
+    """
+    print('Retriving list of bike share files from s3 bucket: {}'.format(NYC_BIKE_SHARE_S3_REPO))
+    try:
+        response = requests.get(s3_bucket_url)
+        response.raise_for_status()
+        files = _parse_s3_xml_result_to_files(response.content)
+        print('files under s3 bucket:\n{}'.format('\n'.join(files)))
+        return files
+    except requests.exceptions.HTTPError as err:
+        print(err)
+        return None
+
+
+def main(config_ini_file: str):
     """
     main program to invoke local functions
-    :param dir_path_name:
     :param config_ini_file:
     :return: None
     """
-    csv_files = _list_files(dir_path_name)
-    print(csv_files)
-    df = _load_csv_files(csv_files)
+    s3_bucket_files = _get_s3_bucket_files(NYC_BIKE_SHARE_S3_REPO)
+    if not s3_bucket_files:
+        print(' No files in s3 bucket url: {}'.format(NYC_BIKE_SHARE_S3_REPO))
+
+    for file in s3_bucket_files:
+        dir_path_name = download_zip_file(NYC_BIKE_SHARE_S3_REPO + '/{}'.format(file))
+
+    csv_files = list_files(dir_path_name)
+    print('Following files downloaded:\n{}'.format('\n'.join(csv_files)))
+    df = load_csv_files_into_df(csv_files)
     _insert_into_db(df, config_ini_file)
 
 
 if __name__ == '__main__':
     input_args = sys.argv
     print(input_args)
-    if len(input_args) < 3:
+    if len(input_args) < 2:
         print(
-            "program argumensts missing. usage: python E:/python/bulk_data_loader/data_loader/nyc_bike_share.py E:/python/data/capitalbikeshare-tripdata E:/python/bulk_data_loader/config/db.ini")
-    # path = 'E:/python/data/capitalbikeshare-tripdata'
-    # config_ini_file = 'E:/python/bulk_data_loader/config/db.ini'
-    main(dir_path_name=input_args[1], config_ini_file=input_args[2])
+            "program argumensts missing. usage: python E:/python/bulk_data_loader/data_loader/nyc_bike_share.py file_path_to_db.ini")
+        sys.exit(1)
+
+    # path = 'https://s3.amazonaws.com/capitalbikeshare-data/2010-capitalbikeshare-tripdata.zip'
+    config_ini_file = input_args[1]  # 'E:/python/bulk_data_loader/config/db.ini'
+    print(tempfile.gettempdir())
+    main(config_ini_file=config_ini_file)
